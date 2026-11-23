@@ -1,0 +1,15 @@
+{
+  "platformio-ide.customPATH": "C:\\Python312\\Scripts;C:\\Python312;",
+  "platformio-ide.useDevelopmentCore": false,
+  "platformio-ide.autoPreloadProjectTasks": true,
+  "terminal.integrated.env.windows": {
+    "PLATFORMIO_HOME": "${workspaceFolder}/.pio"
+  },
+  "editor.formatOnSave": true,
+  "files.exclude": {
+    "**/.pio": true,
+    "**/.vscode": false,
+    "**/__pycache__": true,
+    "**/*.o": true
+  }
+}

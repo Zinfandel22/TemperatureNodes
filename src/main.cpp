@@ -16,11 +16,14 @@ bool isHub = false;
 
 constexpr uint32_t HUB_LOCAL_INTERVAL = 30UL * 60UL * 1000UL;
 constexpr uint32_t HUB_PAIRING_WINDOW = 2UL * 60UL * 1000UL;
+constexpr uint32_t ELAPSED_TIME_INTERVAL = 60UL * 1000UL;
 constexpr uint8_t RESET_ALL_NODES = (1U << MAX_REMOTE_NODES) - 1;
 const uint8_t BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 struct NodeSlot {
     bool hasNewData;
+    bool hasContact;
+    uint32_t lastContactMs;
     SensorPacket packet;
     bool resetCheck;
     uint8_t sourceMac[6];
@@ -40,14 +43,33 @@ NodeSlot nodeSlots[MAX_REMOTE_NODES] = {};
 portMUX_TYPE nodeSlotsMux = portMUX_INITIALIZER_UNLOCKED;
 bool hasLocalSensor = false;
 unsigned long lastLocalSampleMs = 0;
-uint32_t hubSampleCount = 0;
+unsigned long lastLocalContactMs = 0;
 bool hubEdgentReady = false;
 bool hubRadioReady = false;
 bool hubPairingOpen = false;
 uint32_t hubPairingStarted = 0;
+unsigned long lastElapsedPublishMs = 0;
 Preferences hubPreferences;
 bool hubResetStoreReady = false;
 HubResetState hubResetState = {};
+
+String formatElapsedHhMm(uint32_t elapsedMs) {
+    uint32_t elapsedMinutes = elapsedMs / 60000UL;
+    uint32_t hours = elapsedMinutes / 60UL;
+    uint32_t minutes = elapsedMinutes % 60UL;
+
+    char result[16];
+    if (hours < 10) {
+        snprintf(result, sizeof(result), "0%lu:%02lu",
+                 static_cast<unsigned long>(hours),
+                 static_cast<unsigned long>(minutes));
+    } else {
+        snprintf(result, sizeof(result), "%lu:%02lu",
+                 static_cast<unsigned long>(hours),
+                 static_cast<unsigned long>(minutes));
+    }
+    return String(result);
+}
 
 void onHubDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
     if (!recv_info || !recv_info->src_addr || !incomingData) return;
@@ -59,6 +81,8 @@ void onHubDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingDa
         portENTER_CRITICAL(&nodeSlotsMux);
         nodeSlots[idx].packet = tempPacket;
         nodeSlots[idx].hasNewData = true;
+        nodeSlots[idx].hasContact = true;
+        nodeSlots[idx].lastContactMs = millis();
         nodeSlots[idx].resetCheck = true;
         memcpy(nodeSlots[idx].sourceMac, recv_info->src_addr, 6);
         portEXIT_CRITICAL(&nodeSlotsMux);
@@ -288,6 +312,7 @@ void setupHub() {
         Serial.println("[Hub] Blynk Edgent initialization failed");
     }
     lastLocalSampleMs = millis() - HUB_LOCAL_INTERVAL;
+    lastElapsedPublishMs = millis() - ELAPSED_TIME_INTERVAL;
 }
 
 void loopHub() {
@@ -313,7 +338,7 @@ void loopHub() {
         if (hasNewData) {
             Blynk.virtualWrite(i,      pkt.temperatureC);
             Blynk.virtualWrite(i + 4,  pkt.humidityPct);
-            Blynk.virtualWrite(i + 10, pkt.bootCount);
+            Blynk.virtualWrite(i + 10, "00:00");
             Blynk.virtualWrite(i + 20, pkt.batteryVolts);
             Blynk.virtualWrite(i + 30, lipoVoltsToPercent(pkt.batteryVolts));
 
@@ -323,13 +348,36 @@ void loopHub() {
         }
     }
 
+    if (millis() - lastElapsedPublishMs >= ELAPSED_TIME_INTERVAL) {
+        lastElapsedPublishMs = millis();
+        for (uint8_t i = 0; i < MAX_REMOTE_NODES; i++) {
+            portENTER_CRITICAL(&nodeSlotsMux);
+            bool hasContact = nodeSlots[i].hasContact;
+            uint32_t lastContactMs = nodeSlots[i].lastContactMs;
+            portEXIT_CRITICAL(&nodeSlotsMux);
+
+            if (hasContact) {
+                Blynk.virtualWrite(i + 10, formatElapsedHhMm(millis() - lastContactMs));
+            } else {
+                Blynk.virtualWrite(i + 10, "--:--");
+            }
+        }
+
+        if (hasLocalSensor) {
+            portENTER_CRITICAL(&nodeSlotsMux);
+            uint32_t elapsedMs = lastLocalContactMs ? millis() - lastLocalContactMs : 0;
+            portEXIT_CRITICAL(&nodeSlotsMux);
+            Blynk.virtualWrite(V14, formatElapsedHhMm(elapsedMs));
+        }
+    }
+
     if (hasLocalSensor && (millis() - lastLocalSampleMs >= HUB_LOCAL_INTERVAL)) {
         lastLocalSampleMs = millis();
-        hubSampleCount++;
         ShtReading localEnv = readSht40();
+        lastLocalContactMs = millis();
         Blynk.virtualWrite(V8,  localEnv.temperatureC);
         Blynk.virtualWrite(V9,  localEnv.humidityPct);
-        Blynk.virtualWrite(V14, hubSampleCount);
+        Blynk.virtualWrite(V14, "00:00");
     }
 }
 

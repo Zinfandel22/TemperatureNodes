@@ -56,19 +56,29 @@ For each node, connect two equal 220 kΩ resistors in series between battery pos
 
 The reported battery percentage is a linear estimate from 3.20 V (0%) to 4.20 V (100%), clamped to that range; it is not a calibrated state-of-charge measurement.
 
+## Blynk account requirement
+
+A [Blynk](https://www.blynk.io/) account is required to provision the hub and view its measurements or use the pairing controls. The nodes communicate with the hub over ESP-NOW and do not need separate Blynk accounts or devices.
+
+1. [Sign up for Blynk](https://blynk.cloud/dashboard/register) or sign in to [Blynk.Console](https://blynk.cloud/dashboard/login). See [Blynk's getting started guide](https://docs.blynk.io/en/getting-started) for account and app setup.
+2. Create or access a device template in the console, configure the datastreams and event below, and set up dashboard widgets as needed. Copy that template's ID and name into [`src/hub/BlynkSettings.h`](src/hub/BlynkSettings.h); the values currently in this project refer to an existing template and may not be accessible from your account.
+3. Install the Blynk IoT mobile app and sign in to an account with access to the template. Use the app to provision the hub as described below.
+
+Blynk offers a free plan and paid plans; check [Blynk pricing](https://www.blynk.io/pricing) for current limits and available features.
+
 ## Blynk datastreams
 
 Configure these virtual pins in the Blynk template:
 
-| Source           | Temperature (°C), Double | Humidity (%RH), Double | Wake / sample count, Double | Battery voltage (V), Double | Battery level (%), Integer |
-| ---------------- | ------------------------ | ---------------------- | --------------------------- | --------------------------- | -------------------------- |
-| Node 1           | V0                       | V4                     | V10                         | V20                         | V30                        |
-| Node 2           | V1                       | V5                     | V11                         | V21                         | V31                        |
-| Node 3           | V2                       | V6                     | V12                         | V22                         | V32                        |
-| Node 4           | V3                       | V7                     | V13                         | V23                         | V33                        |
-| Hub local sensor | V8                       | V9                     | V14                         | -                           | -                          |
+| Source           | Temperature (°C), Double | Humidity (%RH), Double | Time since last contact (HH:MM), String | Battery voltage (V), Double | Battery level (%), Integer |
+| ---------------- | ------------------------ | ---------------------- | --------------------------------------- | --------------------------- | -------------------------- |
+| Node 1           | V0                       | V4                     | V10                                     | V20                         | V30                        |
+| Node 2           | V1                       | V5                     | V11                                     | V21                         | V31                        |
+| Node 3           | V2                       | V6                     | V12                                     | V22                         | V32                        |
+| Node 4           | V3                       | V7                     | V13                                     | V23                         | V33                        |
+| Hub local sensor | V8                       | V9                     | V14                                     | -                           | -                          |
 
-Node wake counts are retained across deep sleep; the hub's sample count resets when it restarts. If a node's SHT40 initialization fails, it sends `-999` for both temperature and humidity.
+Node contact time is measured on the hub and resets to `00:00` whenever a node report arrives. The hub local-sensor time also resets to `00:00` after each local reading. Both are updated every minute. `--:--` means no contact has been received; if a node's SHT40 initialization fails, it sends `-999` for both temperature and humidity.
 
 Create a Blynk event with the code `low_battery` for alerts. The hub emits it when a node reports a voltage **greater than 2.50 V and less than 3.40 V**.
 
