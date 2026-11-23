@@ -78,7 +78,7 @@ Configure these virtual pins in the Blynk template:
 | Node 4           | V3                       | V7                     | V13                                     | V23                         | V33                        |
 | Hub local sensor | V8                       | V9                     | V14                                     | -                           | -                          |
 
-Node contact time is measured on the hub and resets to `00:00` whenever a node report arrives. The hub local-sensor time also resets to `00:00` after each local reading. Both are updated every minute. `--:--` means no contact has been received; if a node's SHT40 initialization fails, it sends `-999` for both temperature and humidity.
+Node contact time is measured on the hub and resets to `00:00` whenever a node report arrives. The hub local-sensor time also resets to `00:00` after each local reading. Both are updated every minute. `--:--` means no contact has been received. After three missed 30-minute wake periods (90 minutes), the node contact datastream changes to `OFFLINE HH:MM`; the hub sends a `node_offline` event once until that node reports again. If a node's SHT40 initialization fails, it sends `-999` for both temperature and humidity.
 
 Create a Blynk event with the code `low_battery` for alerts. The hub emits it when a node reports a voltage **greater than 2.50 V and less than 3.40 V**.
 

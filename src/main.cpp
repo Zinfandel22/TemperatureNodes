@@ -17,12 +17,15 @@ bool isHub = false;
 constexpr uint32_t HUB_LOCAL_INTERVAL = 30UL * 60UL * 1000UL;
 constexpr uint32_t HUB_PAIRING_WINDOW = 2UL * 60UL * 1000UL;
 constexpr uint32_t ELAPSED_TIME_INTERVAL = 60UL * 1000UL;
+constexpr uint32_t NODE_OFFLINE_ATTEMPTS = 3;
+constexpr uint32_t NODE_OFFLINE_MS = NODE_OFFLINE_ATTEMPTS * 30UL * 60UL * 1000UL;
 constexpr uint8_t RESET_ALL_NODES = (1U << MAX_REMOTE_NODES) - 1;
 const uint8_t BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 struct NodeSlot {
     bool hasNewData;
     bool hasContact;
+    bool offlineAlertSent;
     uint32_t lastContactMs;
     SensorPacket packet;
     bool resetCheck;
@@ -332,6 +335,7 @@ void loopHub() {
         if (hasNewData) {
             memcpy(&pkt, &nodeSlots[i].packet, sizeof(SensorPacket));
             nodeSlots[i].hasNewData = false;
+            nodeSlots[i].offlineAlertSent = false;
         }
         portEXIT_CRITICAL(&nodeSlotsMux);
 
@@ -354,10 +358,31 @@ void loopHub() {
             portENTER_CRITICAL(&nodeSlotsMux);
             bool hasContact = nodeSlots[i].hasContact;
             uint32_t lastContactMs = nodeSlots[i].lastContactMs;
+            bool offlineAlertSent = nodeSlots[i].offlineAlertSent;
             portEXIT_CRITICAL(&nodeSlotsMux);
 
             if (hasContact) {
-                Blynk.virtualWrite(i + 10, formatElapsedHhMm(millis() - lastContactMs));
+                uint32_t elapsedMs = millis() - lastContactMs;
+                if (elapsedMs >= NODE_OFFLINE_MS) {
+                    Blynk.virtualWrite(i + 10,
+                                       "OFFLINE " + formatElapsedHhMm(elapsedMs));
+                    if (!offlineAlertSent) {
+                        portENTER_CRITICAL(&nodeSlotsMux);
+                        if (!nodeSlots[i].offlineAlertSent) {
+                            nodeSlots[i].offlineAlertSent = true;
+                            offlineAlertSent = true;
+                        }
+                        portEXIT_CRITICAL(&nodeSlotsMux);
+                        if (offlineAlertSent) {
+                            Blynk.logEvent("node_offline",
+                                           String("Node ") + (i + 1) +
+                                           " offline after " + NODE_OFFLINE_ATTEMPTS +
+                                           " missed reports");
+                        }
+                    }
+                } else {
+                    Blynk.virtualWrite(i + 10, formatElapsedHhMm(elapsedMs));
+                }
             } else {
                 Blynk.virtualWrite(i + 10, "--:--");
             }
