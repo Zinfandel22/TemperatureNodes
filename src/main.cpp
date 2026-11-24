@@ -4,21 +4,25 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_idf_version.h>
+#include <esp_timer.h>
+#include <time.h>
 #include "shared_protocol.h"
 #include "sensor_hal.h"
 #include "node_pairing_reset.h"
 #include "hub/BlynkSettings.h"
 #include <BlynkEdgent.h>
 #include "hub/Interaction.h"
+#include "hub/LastContactTime.h"
 
 constexpr uint8_t ROLE_PIN = D3;
 bool isHub = false;
 
 constexpr uint32_t HUB_LOCAL_INTERVAL = 30UL * 60UL * 1000UL;
 constexpr uint32_t HUB_PAIRING_WINDOW = 2UL * 60UL * 1000UL;
-constexpr uint32_t ELAPSED_TIME_INTERVAL = 60UL * 1000UL;
+constexpr uint32_t CONTACT_STATUS_INTERVAL = 60UL * 1000UL;
 constexpr uint32_t NODE_OFFLINE_ATTEMPTS = 3;
-constexpr uint32_t NODE_OFFLINE_MS = NODE_OFFLINE_ATTEMPTS * 30UL * 60UL * 1000UL;
+constexpr int64_t NODE_OFFLINE_US = NODE_OFFLINE_ATTEMPTS * 30LL * 60LL * 1000000LL;
+constexpr char PACIFIC_TIME_ZONE[] = "PST8PDT,M3.2.0,M11.1.0";
 constexpr uint8_t RESET_ALL_NODES = (1U << MAX_REMOTE_NODES) - 1;
 const uint8_t BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
@@ -26,7 +30,8 @@ struct NodeSlot {
     bool hasNewData;
     bool hasContact;
     bool offlineAlertSent;
-    uint32_t lastContactMs;
+    int64_t lastContactUs;
+    time_t lastContactTime;
     SensorPacket packet;
     bool resetCheck;
     uint8_t sourceMac[6];
@@ -46,31 +51,25 @@ NodeSlot nodeSlots[MAX_REMOTE_NODES] = {};
 portMUX_TYPE nodeSlotsMux = portMUX_INITIALIZER_UNLOCKED;
 bool hasLocalSensor = false;
 unsigned long lastLocalSampleMs = 0;
-unsigned long lastLocalContactMs = 0;
+time_t lastLocalContactTime = 0;
 bool hubEdgentReady = false;
 bool hubRadioReady = false;
 bool hubPairingOpen = false;
 uint32_t hubPairingStarted = 0;
-unsigned long lastElapsedPublishMs = 0;
+unsigned long lastContactStatusPublishMs = 0;
 Preferences hubPreferences;
 bool hubResetStoreReady = false;
 HubResetState hubResetState = {};
 
-String formatElapsedHhMm(uint32_t elapsedMs) {
-    uint32_t elapsedMinutes = elapsedMs / 60000UL;
-    uint32_t hours = elapsedMinutes / 60UL;
-    uint32_t minutes = elapsedMinutes % 60UL;
-
-    char result[16];
-    if (hours < 10) {
-        snprintf(result, sizeof(result), "0%lu:%02lu",
-                 static_cast<unsigned long>(hours),
-                 static_cast<unsigned long>(minutes));
-    } else {
-        snprintf(result, sizeof(result), "%lu:%02lu",
-                 static_cast<unsigned long>(hours),
-                 static_cast<unsigned long>(minutes));
+String formatLastContact(time_t contactTime) {
+    if (contactTime < MIN_VALID_CLOCK_TIME) return "--:--";
+    tm localTime;
+    if (!localtime_r(&contactTime, &localTime)) {
+        Serial.println("[Hub] Failed to convert contact time");
+        return "--:--";
     }
+    char result[9];
+    formatContactTime(localTime, result, sizeof(result));
     return String(result);
 }
 
@@ -81,11 +80,14 @@ void onHubDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingDa
         memcpy(&tempPacket, incomingData, sizeof(tempPacket));
         if (tempPacket.nodeId < 1 || tempPacket.nodeId > MAX_REMOTE_NODES) return;
         uint8_t idx = tempPacket.nodeId - 1;
+        int64_t contactUs = esp_timer_get_time();
+        time_t contactTime = time(nullptr);
         portENTER_CRITICAL(&nodeSlotsMux);
         nodeSlots[idx].packet = tempPacket;
         nodeSlots[idx].hasNewData = true;
         nodeSlots[idx].hasContact = true;
-        nodeSlots[idx].lastContactMs = millis();
+        nodeSlots[idx].lastContactUs = contactUs;
+        nodeSlots[idx].lastContactTime = contactTime;
         nodeSlots[idx].resetCheck = true;
         memcpy(nodeSlots[idx].sourceMac, recv_info->src_addr, 6);
         portEXIT_CRITICAL(&nodeSlotsMux);
@@ -270,6 +272,7 @@ void setupHub() {
     delay(200);
     Serial.println("[Hub] Starting");
 
+    configTzTime(PACIFIC_TIME_ZONE, "pool.ntp.org", "time.nist.gov");
     hasLocalSensor = initSht40();
     hubResetStoreReady = hubPreferences.begin("hub-reset", false);
     if (hubResetStoreReady && hubPreferences.isKey("state")) {
@@ -315,7 +318,7 @@ void setupHub() {
         Serial.println("[Hub] Blynk Edgent initialization failed");
     }
     lastLocalSampleMs = millis() - HUB_LOCAL_INTERVAL;
-    lastElapsedPublishMs = millis() - ELAPSED_TIME_INTERVAL;
+    lastContactStatusPublishMs = millis() - CONTACT_STATUS_INTERVAL;
 }
 
 void loopHub() {
@@ -330,19 +333,21 @@ void loopHub() {
 
     for (uint8_t i = 0; i < MAX_REMOTE_NODES; i++) {
         SensorPacket pkt;
+        time_t contactTime = 0;
         portENTER_CRITICAL(&nodeSlotsMux);
         bool hasNewData = nodeSlots[i].hasNewData;
         if (hasNewData) {
             memcpy(&pkt, &nodeSlots[i].packet, sizeof(SensorPacket));
+            contactTime = nodeSlots[i].lastContactTime;
             nodeSlots[i].hasNewData = false;
             nodeSlots[i].offlineAlertSent = false;
         }
         portEXIT_CRITICAL(&nodeSlotsMux);
 
         if (hasNewData) {
-            Blynk.virtualWrite(i,      pkt.temperatureC);
+            Blynk.virtualWrite(i,      pkt.temperatureF);
             Blynk.virtualWrite(i + 4,  pkt.humidityPct);
-            Blynk.virtualWrite(i + 10, "00:00");
+            Blynk.virtualWrite(i + 10, formatLastContact(contactTime));
             Blynk.virtualWrite(i + 20, pkt.batteryVolts);
             Blynk.virtualWrite(i + 30, lipoVoltsToPercent(pkt.batteryVolts));
 
@@ -352,28 +357,30 @@ void loopHub() {
         }
     }
 
-    if (millis() - lastElapsedPublishMs >= ELAPSED_TIME_INTERVAL) {
-        lastElapsedPublishMs = millis();
+    if (millis() - lastContactStatusPublishMs >= CONTACT_STATUS_INTERVAL) {
+        lastContactStatusPublishMs = millis();
         for (uint8_t i = 0; i < MAX_REMOTE_NODES; i++) {
             portENTER_CRITICAL(&nodeSlotsMux);
             bool hasContact = nodeSlots[i].hasContact;
-            uint32_t lastContactMs = nodeSlots[i].lastContactMs;
+            int64_t lastContactUs = nodeSlots[i].lastContactUs;
+            time_t contactTime = nodeSlots[i].lastContactTime;
             bool offlineAlertSent = nodeSlots[i].offlineAlertSent;
             portEXIT_CRITICAL(&nodeSlotsMux);
 
             if (hasContact) {
-                uint32_t elapsedMs = millis() - lastContactMs;
-                if (elapsedMs >= NODE_OFFLINE_MS) {
+                if (esp_timer_get_time() - lastContactUs >= NODE_OFFLINE_US) {
                     Blynk.virtualWrite(i + 10,
-                                       "OFFLINE " + formatElapsedHhMm(elapsedMs));
+                                       "OFFLINE " + formatLastContact(contactTime));
                     if (!offlineAlertSent) {
+                        bool sendAlert = false;
                         portENTER_CRITICAL(&nodeSlotsMux);
-                        if (!nodeSlots[i].offlineAlertSent) {
+                        if (!nodeSlots[i].offlineAlertSent &&
+                            nodeSlots[i].lastContactUs == lastContactUs) {
                             nodeSlots[i].offlineAlertSent = true;
-                            offlineAlertSent = true;
+                            sendAlert = true;
                         }
                         portEXIT_CRITICAL(&nodeSlotsMux);
-                        if (offlineAlertSent) {
+                        if (sendAlert) {
                             Blynk.logEvent("node_offline",
                                            String("Node ") + (i + 1) +
                                            " offline after " + NODE_OFFLINE_ATTEMPTS +
@@ -381,7 +388,7 @@ void loopHub() {
                         }
                     }
                 } else {
-                    Blynk.virtualWrite(i + 10, formatElapsedHhMm(elapsedMs));
+                    Blynk.virtualWrite(i + 10, formatLastContact(contactTime));
                 }
             } else {
                 Blynk.virtualWrite(i + 10, "--:--");
@@ -389,20 +396,17 @@ void loopHub() {
         }
 
         if (hasLocalSensor) {
-            portENTER_CRITICAL(&nodeSlotsMux);
-            uint32_t elapsedMs = lastLocalContactMs ? millis() - lastLocalContactMs : 0;
-            portEXIT_CRITICAL(&nodeSlotsMux);
-            Blynk.virtualWrite(V14, formatElapsedHhMm(elapsedMs));
+            Blynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
         }
     }
 
     if (hasLocalSensor && (millis() - lastLocalSampleMs >= HUB_LOCAL_INTERVAL)) {
         lastLocalSampleMs = millis();
         ShtReading localEnv = readSht40();
-        lastLocalContactMs = millis();
-        Blynk.virtualWrite(V8,  localEnv.temperatureC);
+        lastLocalContactTime = time(nullptr);
+        Blynk.virtualWrite(V8,  localEnv.temperatureF);
         Blynk.virtualWrite(V9,  localEnv.humidityPct);
-        Blynk.virtualWrite(V14, "00:00");
+        Blynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
     }
 }
 
@@ -658,7 +662,7 @@ void setupNode() {
 
     SensorPacket packet = {
         .nodeId       = nodeId,
-        .temperatureC = env.temperatureC,
+        .temperatureF = env.temperatureF,
         .humidityPct  = env.humidityPct,
         .batteryVolts = battVolts,
         .bootCount    = rtcBootCount

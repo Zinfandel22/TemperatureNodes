@@ -43,7 +43,7 @@ inline bool resetRequestMatches(const ControlPacket &packet, uint8_t nodeId,
 // ESP-NOW Protocol packet structure
 struct SensorPacket {
     uint8_t  nodeId;           // Node ID (1-4)
-    float    temperatureC;     // Temperature in Celsius
+    float    temperatureF;     // Temperature in Fahrenheit
     float    humidityPct;      // Relative humidity percentage
     float    batteryVolts;     // Battery voltage
     uint32_t bootCount;        // Boot counter for diagnostics

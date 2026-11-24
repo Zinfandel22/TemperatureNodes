@@ -26,7 +26,13 @@ ShtReading readSht40() {
     }
     sensors_event_t humidity, temp;
     sht4.getEvent(&humidity, &temp);
-    return {temp.temperature, humidity.relative_humidity};
+    float temperatureF = isnan(temp.temperature)
+        ? -999.0f
+        : (temp.temperature * 1.8f) + 32.0f;
+    float humidityPct = isnan(humidity.relative_humidity)
+        ? -999.0f
+        : humidity.relative_humidity;
+    return {temperatureF, humidityPct};
 }
 
 float readBatteryVolts() {

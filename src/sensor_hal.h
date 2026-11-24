@@ -3,7 +3,7 @@
 
 struct ShtReading
 {
-    float temperatureC;
+    float temperatureF;
     float humidityPct;
 };
 
