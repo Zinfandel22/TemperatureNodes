@@ -161,7 +161,13 @@ The serial monitor uses 115200 baud. A momentary button between D0 and GND opens
 
 ## Documentation
 
+**Setup & Design:**
 - **[QUICK_START.md](QUICK_START.md)** – Getting started guide with step-by-step setup
 - **[SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md)** – Complete system design, data flow, and batching analysis
+
+**Testing & Debugging:**
 - **[TEST_PLAN.md](TEST_PLAN.md)** – Comprehensive test plan covering all 35 test scenarios
 - **[TEST_QUICK_REFERENCE.md](TEST_QUICK_REFERENCE.md)** – Quick reference card with critical tests, common issues, and execution templates
+- **[SERIAL_DEBUG_REFERENCE.md](SERIAL_DEBUG_REFERENCE.md)** – Complete serial output reference for all device states and troubleshooting
+- **[NODE_BOOT_SEQUENCE.md](NODE_BOOT_SEQUENCE.md)** – Visual guide to node startup, pairing, and measurement flow with expected serial output
+- **[SERIAL_OUTPUT_EXAMPLES.md](SERIAL_OUTPUT_EXAMPLES.md)** – Real-world serial output scenarios with actual terminal logs and analysis
