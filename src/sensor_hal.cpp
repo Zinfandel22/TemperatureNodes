@@ -25,7 +25,10 @@ ShtReading readSht40() {
         return {-999.0f, -999.0f};
     }
     sensors_event_t humidity, temp;
-    sht4.getEvent(&humidity, &temp);
+    if (!sht4.getEvent(&humidity, &temp)) {
+        Serial.println("[Sensor] SHT40 read failed; reporting invalid readings");
+        return {-999.0f, -999.0f};
+    }
     float temperatureF = isnan(temp.temperature)
         ? -999.0f
         : (temp.temperature * 1.8f) + 32.0f;

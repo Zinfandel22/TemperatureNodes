@@ -13,6 +13,8 @@
 #include <BlynkEdgent.h>
 #include "hub/Interaction.h"
 #include "hub/LastContactTime.h"
+#include "hub/DemoMode.h"
+#include "hub/LoggedBlynk.h"
 
 constexpr uint8_t ROLE_PIN = D3;
 bool isHub = false;
@@ -50,6 +52,8 @@ struct HubResetState {
 NodeSlot nodeSlots[MAX_REMOTE_NODES] = {};
 portMUX_TYPE nodeSlotsMux = portMUX_INITIALIZER_UNLOCKED;
 bool hasLocalSensor = false;
+bool hasLocalReading = false;
+ShtReading lastLocalReading = {};
 unsigned long lastLocalSampleMs = 0;
 time_t lastLocalContactTime = 0;
 bool hubEdgentReady = false;
@@ -60,6 +64,15 @@ unsigned long lastContactStatusPublishMs = 0;
 Preferences hubPreferences;
 bool hubResetStoreReady = false;
 HubResetState hubResetState = {};
+DemoMode demoMode;
+bool requestedDemoMode = false;
+bool demoModeRequestPending = false;
+bool restoreRealReadings = false;
+LoggedBlynk<decltype(Blynk), decltype(Serial)> loggedBlynk(Blynk, Serial);
+
+long demoRandom(long minValue, long maxValue) {
+    return minValue + esp_random() % (maxValue - minValue);
+}
 
 String formatLastContact(time_t contactTime) {
     if (contactTime < MIN_VALID_CLOCK_TIME) return "--:--";
@@ -120,7 +133,7 @@ BLYNK_WRITE(V40) {
             hubResetState = next;
             Serial.println("[Hub] Pairing reset queued for all nodes");
         }
-        Blynk.virtualWrite(V40, 0);
+        loggedBlynk.virtualWrite(V40, 0);
     } else if (value != 0) {
         Serial.println("[Hub] V40 expects 0 or 1");
     }
@@ -158,9 +171,24 @@ BLYNK_WRITE(V41) {
     int value = param.asInt();
     if (value == 1) {
         openHubPairing();
-        Blynk.virtualWrite(V41, 0);
+        loggedBlynk.virtualWrite(V41, 0);
     } else if (value != 0) {
         Serial.println("[Hub] V41 expects 0 or 1");
+    }
+}
+
+BLYNK_CONNECTED() {
+    Serial.println("[Blynk] Requesting V100 sync");
+    Blynk.syncVirtual(V100);
+}
+
+BLYNK_WRITE(V100) {
+    int value = param.asInt();
+    if (value == 0 || value == 1) {
+        requestedDemoMode = value == 1;
+        demoModeRequestPending = true;
+    } else {
+        Serial.println("[Hub] V100 expects 0 or 1");
     }
 }
 
@@ -274,6 +302,9 @@ void setupHub() {
 
     configTzTime(PACIFIC_TIME_ZONE, "pool.ntp.org", "time.nist.gov");
     hasLocalSensor = initSht40();
+    if (!hasLocalSensor) {
+        Serial.println("[Hub] SHT40 initialization failed; no local readings will be published");
+    }
     hubResetStoreReady = hubPreferences.begin("hub-reset", false);
     if (hubResetStoreReady && hubPreferences.isKey("state")) {
         if (hubPreferences.getBytesLength("state") != sizeof(hubResetState) ||
@@ -331,33 +362,59 @@ void loopHub() {
     processHubControl();
     if (!Blynk.connected()) return;
 
-    for (uint8_t i = 0; i < MAX_REMOTE_NODES; i++) {
+    if (demoModeRequestPending) {
+        demoModeRequestPending = false;
+        demoMode.setEnabled(requestedDemoMode);
+        restoreRealReadings = !requestedDemoMode;
+        Serial.printf("[Hub] Demo mode %s\n", requestedDemoMode ? "enabled" : "disabled");
+    }
+
+    uint32_t demoNow = millis();
+    if (demoMode.due(demoNow)) {
+        String contact = "ONLINE " + formatLastContact(time(nullptr));
+        demoMode.publishIfDue(loggedBlynk, demoNow, contact.c_str(), demoRandom);
+    }
+
+    loggedBlynk.beginGroup();
+
+    for (uint8_t i = 0; !demoMode.enabled() && i < MAX_REMOTE_NODES; i++) {
         SensorPacket pkt;
         time_t contactTime = 0;
         portENTER_CRITICAL(&nodeSlotsMux);
         bool hasNewData = nodeSlots[i].hasNewData;
-        if (hasNewData) {
+        bool hasContact = nodeSlots[i].hasContact;
+        if (hasNewData || (restoreRealReadings && hasContact)) {
             memcpy(&pkt, &nodeSlots[i].packet, sizeof(SensorPacket));
             contactTime = nodeSlots[i].lastContactTime;
+        }
+        if (hasNewData) {
             nodeSlots[i].hasNewData = false;
             nodeSlots[i].offlineAlertSent = false;
         }
         portEXIT_CRITICAL(&nodeSlotsMux);
 
-        if (hasNewData) {
-            Blynk.virtualWrite(i,      pkt.temperatureF);
-            Blynk.virtualWrite(i + 4,  pkt.humidityPct);
-            Blynk.virtualWrite(i + 10, formatLastContact(contactTime));
-            Blynk.virtualWrite(i + 20, pkt.batteryVolts);
-            Blynk.virtualWrite(i + 30, lipoVoltsToPercent(pkt.batteryVolts));
+        if (hasNewData || (restoreRealReadings && hasContact)) {
+            Serial.printf("[Hub] Node %u report: %.2f F, %.2f %%RH\n",
+                          static_cast<unsigned>(pkt.nodeId), pkt.temperatureF, pkt.humidityPct);
+            loggedBlynk.virtualWrite(i,      pkt.temperatureF);
+            loggedBlynk.virtualWrite(i + 4,  pkt.humidityPct);
+            loggedBlynk.virtualWrite(i + 10, formatLastContact(contactTime));
+            loggedBlynk.virtualWrite(i + 20, pkt.batteryVolts);
+            loggedBlynk.virtualWrite(i + 30, lipoVoltsToPercent(pkt.batteryVolts));
 
-            if (pkt.batteryVolts > 2.50f && pkt.batteryVolts < 3.40f) {
-                Blynk.logEvent("low_battery", String("Node ") + pkt.nodeId + " low: " + String(pkt.batteryVolts, 2) + "V");
+            if (hasNewData && pkt.batteryVolts > 2.50f && pkt.batteryVolts < 3.40f) {
+                loggedBlynk.logEvent("low_battery", String("Node ") + pkt.nodeId + " low: " + String(pkt.batteryVolts, 2) + "V");
             }
+        } else if (restoreRealReadings) {
+            loggedBlynk.virtualWrite(i, -999);
+            loggedBlynk.virtualWrite(i + 4, -999);
+            loggedBlynk.virtualWrite(i + 20, -999);
+            loggedBlynk.virtualWrite(i + 30, -999);
         }
     }
 
-    if (millis() - lastContactStatusPublishMs >= CONTACT_STATUS_INTERVAL) {
+    if (!demoMode.enabled() &&
+        (restoreRealReadings || millis() - lastContactStatusPublishMs >= CONTACT_STATUS_INTERVAL)) {
         lastContactStatusPublishMs = millis();
         for (uint8_t i = 0; i < MAX_REMOTE_NODES; i++) {
             portENTER_CRITICAL(&nodeSlotsMux);
@@ -369,7 +426,7 @@ void loopHub() {
 
             if (hasContact) {
                 if (esp_timer_get_time() - lastContactUs >= NODE_OFFLINE_US) {
-                    Blynk.virtualWrite(i + 10,
+                    loggedBlynk.virtualWrite(i + 10,
                                        "OFFLINE " + formatLastContact(contactTime));
                     if (!offlineAlertSent) {
                         bool sendAlert = false;
@@ -381,33 +438,44 @@ void loopHub() {
                         }
                         portEXIT_CRITICAL(&nodeSlotsMux);
                         if (sendAlert) {
-                            Blynk.logEvent("node_offline",
+                            loggedBlynk.logEvent("node_offline",
                                            String("Node ") + (i + 1) +
                                            " offline after " + NODE_OFFLINE_ATTEMPTS +
                                            " missed reports");
                         }
                     }
                 } else {
-                    Blynk.virtualWrite(i + 10, formatLastContact(contactTime));
+                    loggedBlynk.virtualWrite(i + 10, formatLastContact(contactTime));
                 }
             } else {
-                Blynk.virtualWrite(i + 10, "--:--");
+                loggedBlynk.virtualWrite(i + 10, "--:--");
             }
         }
 
-        if (hasLocalSensor) {
-            Blynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
+        if (hasLocalSensor || restoreRealReadings) {
+            loggedBlynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
         }
     }
 
     if (hasLocalSensor && (millis() - lastLocalSampleMs >= HUB_LOCAL_INTERVAL)) {
         lastLocalSampleMs = millis();
-        ShtReading localEnv = readSht40();
+        lastLocalReading = readSht40();
+        hasLocalReading = true;
+        Serial.printf("[Hub] Local SHT40: %.2f F, %.2f %%RH\n",
+                      lastLocalReading.temperatureF, lastLocalReading.humidityPct);
         lastLocalContactTime = time(nullptr);
-        Blynk.virtualWrite(V8,  localEnv.temperatureF);
-        Blynk.virtualWrite(V9,  localEnv.humidityPct);
-        Blynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
+        if (!demoMode.enabled()) {
+            loggedBlynk.virtualWrite(V8,  lastLocalReading.temperatureF);
+            loggedBlynk.virtualWrite(V9,  lastLocalReading.humidityPct);
+            loggedBlynk.virtualWrite(V14, formatLastContact(lastLocalContactTime));
+        }
+    } else if (!demoMode.enabled() && restoreRealReadings) {
+        loggedBlynk.virtualWrite(V8, hasLocalReading ? lastLocalReading.temperatureF : -999.0f);
+        loggedBlynk.virtualWrite(V9, hasLocalReading ? lastLocalReading.humidityPct : -999.0f);
     }
+
+    loggedBlynk.endGroup();
+    restoreRealReadings = false;
 }
 
 constexpr uint8_t  ID_PIN_BIT0        = D1; // GPIO 2
@@ -591,6 +659,8 @@ void setupNode() {
         Serial.println("[Node] SHT40 initialization failed; sending invalid sensor readings");
     }
     ShtReading env = readSht40();
+    Serial.printf("[Node %u] SHT40: %.2f F, %.2f %%RH\n",
+                  static_cast<unsigned>(nodeId), env.temperatureF, env.humidityPct);
 
     if (preferences.isKey("hub")) {
         if (preferences.getBytesLength("hub") != sizeof(nodeHub) ||

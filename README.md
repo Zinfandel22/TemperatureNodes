@@ -4,6 +4,18 @@ An environmental monitoring project using Seeed Studio XIAO ESP32-S3 boards and 
 
 > **Project status:** The hub uses official Blynk.Edgent for BLE-assisted provisioning, connection management, and OTA. Hub provisioning and Blynk connection have succeeded on one Wi-Fi network. Node pairing, sensor delivery, reset, and OTA still require hardware testing.
 
+## Batch Data Publishing
+
+The hub publishes all sensor data with **protocol-level batch grouping** via Blynk's `beginGroup()` / `endGroup()` API. This ensures all 18+ datastreams receive a shared server-side timestamp, improving data consistency for downstream consumers (e.g., the companion [Temperature Orbs](https://github.com/Zinfandel22/TemperatureOrbs) display project).
+
+**Serial log output is significantly cleaner:**
+```
+[Hub] Node 1 report: 72.50 F, 45.20 %RH
+[Blynk] Batch: 25 datastreams with shared timestamp
+```
+
+See [`QUICK_START.md`](QUICK_START.md) for details.
+
 ## How it works
 
 All boards use the same firmware. A jumper sampled at boot selects the role:
@@ -78,7 +90,7 @@ Configure these virtual pins in the Blynk template:
 | Node 4           | V3                       | V7                     | V13                                     | V23                         | V33                        |
 | Hub local sensor | V8                       | V9                     | V14                                     | -                           | -                          |
 
-Node contact time is the time the hub last received a sensor report; V14 shows the time of the hub's last local reading. Times are US Pacific, including daylight saving time, and do not include a date. The hub synchronizes its clock over the internet using NTP. `--:--` means there is no reading since the hub restarted, or that the reading arrived before the clock was synchronized; a new reading after synchronization supplies the time. After 90 minutes without a report (approximately three 30-minute wake periods), the node datastream shows `OFFLINE` followed by the last contact time, and the hub sends a `node_offline` event once until that node reports again. Offline status is checked about once a minute while connected to Blynk. If a node's SHT40 initialization fails, it sends `-999` for both temperature and humidity.
+Node contact time is the time the hub last received a sensor report; V14 shows the time of the hub's last local reading. Times are US Pacific, including daylight saving time, and do not include a date. The hub synchronizes its clock over the internet using NTP. `--:--` means there is no reading since the hub restarted, or that the reading arrived before the clock was synchronized; a new reading after synchronization supplies the time. After 90 minutes without a report (approximately three 30-minute wake periods), the node datastream shows `OFFLINE` followed by the last contact time, and the hub sends a `node_offline` event once until that node reports again. Offline status is checked about once a minute while connected to Blynk. If a node's SHT40 initialization or read fails, it sends `-999` for both temperature and humidity. The hub does not publish local readings if its sensor fails initialization; a subsequent read failure reports `-999`.
 
 Create Blynk events with the codes `node_offline` and `low_battery` for alerts. The hub emits `low_battery` when a node reports a voltage **greater than 2.50 V and less than 3.40 V**.
 
@@ -86,8 +98,13 @@ Create Blynk events with the codes `node_offline` and `low_battery` for alerts. 
 | ------------- | ----------- | ------------ | ------------------------------------------- |
 | Reset pairing | V40         | Integer, 0–1 | Queue a pairing reset for all four node IDs |
 | Start pairing | V41         | Integer, 0–1 | Open a two-minute pairing window            |
+| Demo mode     | V100        | Integer, 0–1 | Enable simulated readings; `0` restores real monitoring |
 
-Use push buttons that send `1` for these controls. The hub writes `0` back after handling a `1`; this is not confirmation that all nodes have reset or paired. A pairing window requires the hub to be connected to both Wi-Fi and Blynk.
+Use push buttons that send `1` for the pairing controls. The hub writes `0` back after handling a `1`; this is not confirmation that all nodes have reset or paired. A pairing window requires the hub to be connected to both Wi-Fi and Blynk. For V100 use a switch that sends `1` when on and `0` when off. Configure its default as `0`; the hub requests the saved V100 value on each Blynk connection, including after a restart.
+
+In demo mode the hub publishes independently randomized temperatures (65.0–80.0 °F) and humidity (35.0–65.0 %RH) for itself and all four nodes immediately and every 30 seconds. Node battery values are simulated as 3.8 V and 75%, and V10–V14 show `ONLINE` and a simulated contact time (`--:--` if the clock is not synchronized). These values do not reflect actual sensor, connection, or battery status. Pairing and real measurements continue, but low-battery and offline alerts are suppressed until demo mode is turned off.
+
+When demo mode is turned off, the hub republishes the latest real readings and contact status; it checks for overdue offline alerts and reports low battery on any new node report received during the demo. If there is no real reading since the hub restarted, it publishes `-999` for that source's temperature and humidity, and for an unseen node's battery voltage and percentage; contact is `--:--`. Configure the relevant numeric datastreams to accept `-999`, and ensure the contact string datastreams and widgets can display `ONLINE` followed by the time. Real measurements may otherwise take up to 30 minutes to arrive; restart a node to make it report sooner.
 
 ## Configuration and build
 
@@ -123,10 +140,12 @@ The serial monitor uses 115200 baud. A momentary button between D0 and GND opens
 
 ### Serial diagnostics
 
+- The hub logs every Blynk virtual-pin write as `[Blynk] V<pin> = <value>`, including real and demo readings, contact status, battery values, and control resets. Blynk events are logged too. A log records an attempted write, not confirmation of cloud delivery.
 - `[Node 1] Starting` means the board selected node mode; connect D3 to GND and restart if it should be a hub. Nodes report sensor setup, discovery or stored pairing, radio-level delivery acknowledgement, and sleep.
 - On the hub, `Wi-Fi connected to access point; waiting for IP address` means association succeeded, not that an IP address has been assigned. A successful connection continues with `Wi-Fi connected and IP address acquired`, `CONNECTING CLOUD`, and `RUNNING` / `Blynk connected`.
 - If the hub stays without an IP address, check that the router's 2.4 GHz network has DHCP enabled, available addresses, and no access filter blocking the hub. A disconnect reason of `202` means authentication failed; a later successful connection means a retry recovered.
 - Pairing requires an active Wi-Fi and Blynk connection. `Waiting for node pairing` appears only while the two-minute window is open; activate it with V41 or a short D0 button click on the hub.
+- Hub and node serial output includes SHT40 readings in °F and %RH; the hub also logs received node readings when publishing them. Both use `°F = °C × 1.8 + 32` (0 °C is 32 °F, and 32 °C is 89.6 °F). There is no firmware default of 32 °F or 89.6 °F: the hub publishes node temperatures only after receiving reports, and Blynk may display a previously stored or configured value before then. Compare the node, hub, and dashboard readings, check V10–V14 for contact times, and verify widget/datastream pin assignments, units, and ranges. Restart a node to sample immediately rather than waiting up to 30 minutes. If a sensor fails, check its power and I2C wiring; if the hub reads warmer than a nearby node, check sensor placement and heat from the powered board.
 
 ## Project layout
 
@@ -139,3 +158,9 @@ The serial monitor uses 115200 baud. A momentary button between D0 and GND opens
 | [`src/hub/BlynkSettings.h`](src/hub/BlynkSettings.h)       | Blynk template and firmware configuration             |
 | [`src/hub/Interaction.h`](src/hub/Interaction.h)           | Edgent reset-button interaction                       |
 | [`include/shared_protocol.h`](include/shared_protocol.h)   | ESP-NOW sensor and pairing/control packet definitions |
+
+## Documentation
+
+- **[QUICK_START.md](QUICK_START.md)** – Getting started guide with step-by-step setup
+- **[SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md)** – Complete system design, data flow, and batching analysis
+- **[TEST_PLAN.md](TEST_PLAN.md)** – Comprehensive test plan covering all scenarios, error cases, and validations
