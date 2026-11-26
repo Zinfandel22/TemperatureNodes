@@ -163,4 +163,5 @@ The serial monitor uses 115200 baud. A momentary button between D0 and GND opens
 
 - **[QUICK_START.md](QUICK_START.md)** – Getting started guide with step-by-step setup
 - **[SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md)** – Complete system design, data flow, and batching analysis
-- **[TEST_PLAN.md](TEST_PLAN.md)** – Comprehensive test plan covering all scenarios, error cases, and validations
+- **[TEST_PLAN.md](TEST_PLAN.md)** – Comprehensive test plan covering all 35 test scenarios
+- **[TEST_QUICK_REFERENCE.md](TEST_QUICK_REFERENCE.md)** – Quick reference card with critical tests, common issues, and execution templates
